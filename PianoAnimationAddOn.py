@@ -1,52 +1,66 @@
 bl_info = {
     "name": "Piano Animation",
     "blender": (4, 0, 0),
-    "category": "Piano Animation",
+    "category": "Animation",
 }
 
 import bpy
 import os
 import mido
 
-# Property Group for User Preferences
 class PianoAnimationPreferences(bpy.types.PropertyGroup):
     use_imported_model: bpy.props.BoolProperty(
         name="Use Imported Model",
         description="Animate an already imported piano model",
         default=False,
     )
+    midi_filepath: bpy.props.StringProperty(
+        name="MIDI File Path",
+        description="Path to the MIDI file",
+        subtype="FILE_PATH"
+    )
+    mp3_filepath: bpy.props.StringProperty(
+        name="MP3 File Path",
+        description="Path to the MP3 file to play in the background",
+        subtype="FILE_PATH"
+    )
 
-# Operator for Animating
 class PianoAnimationOperator(bpy.types.Operator):
     bl_idname = "object.piano_animation_operator"
     bl_label = "Create Piano Animation"
 
-    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-
     def execute(self, context):
         preferences = context.scene.piano_animation_prefs
+        midi_filepath = preferences.midi_filepath
+        mp3_filepath = preferences.mp3_filepath
         
-        notes = parse_midi(self.filepath)
+        if not midi_filepath or not os.path.isfile(midi_filepath):
+            self.report({'ERROR'}, "MIDI file path is not set or file does not exist.")
+            return {'CANCELLED'}
         
-        if preferences.use_imported_model:
-            self.report({'INFO'}, "To use the plugin, name each key as 'WhiteKey_21', 'BlackKey_22'...")
-            animate_keys(notes)
-        else:
+        if not mp3_filepath or not os.path.isfile(mp3_filepath):
+            self.report({'ERROR'}, "MP3 file path is not set or file does not exist.")
+            return {'CANCELLED'}
+        
+        notes = parse_midi(midi_filepath)
+        
+        if not preferences.use_imported_model:
             create_piano_keys_and_base(context)
-            animate_keys(notes)
             
-         # Update the end frame based on the last note's end time
+        animate_keys(notes)
+        
+        # Add MP3 background music
+        if mp3_filepath:
+            add_background_music(mp3_filepath)
+
+        # Update the end frame based on the last note's end time
         if notes:
             last_note = max(notes, key=lambda n: n[2])  # Get the note with the latest end time
             last_frame = convert_time_to_frame(last_note[2])
             bpy.context.scene.frame_start = 0
-            bpy.context.scene.frame_end = last_frame
+            bpy.context.scene.frame_end = last_frame # Dynamically set the last frame based on the length of the midi
 
         return {'FINISHED'}
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
 
 # UI Panel
 class PianoAnimationPanel(bpy.types.Panel):
@@ -60,21 +74,27 @@ class PianoAnimationPanel(bpy.types.Panel):
         layout = self.layout
         preferences = context.scene.piano_animation_prefs
 
-        # Add a toggle to choose between imported model or new model creation
+        # Checkbox to choose between imported or new model
         layout.prop(preferences, "use_imported_model")
 
-        # Show warning if using imported model
+        # Show naming instructions if using imported model
         if preferences.use_imported_model:
             layout.label(text="Make sure keys are named 'WhiteKey_21', 'BlackKey_22', 'WhiteKey_23'... starting with 21 for the first white key (A0).", icon='ERROR')
 
-        # Add button to trigger the operator
+        # Input for MIDI file
+        layout.prop(preferences, "midi_filepath", text="MIDI File")
+
+        # Input for MP3 file
+        layout.prop(preferences, "mp3_filepath", text="MP3 File")
+
+        # Button to trigger the operator
         layout.operator(PianoAnimationOperator.bl_idname)
 
 # Menu to add operator
 def menu_func(self, context):
     self.layout.operator(PianoAnimationOperator.bl_idname)
 
-# Register and Unregister Functions
+# Register Function
 def register():
     bpy.utils.register_class(PianoAnimationPreferences)
     bpy.utils.register_class(PianoAnimationOperator)
@@ -84,6 +104,7 @@ def register():
     # Add the Property Group to the Scene
     bpy.types.Scene.piano_animation_prefs = bpy.props.PointerProperty(type=PianoAnimationPreferences)
 
+# Unregister Function
 def unregister():
     bpy.utils.unregister_class(PianoAnimationPreferences)
     bpy.utils.unregister_class(PianoAnimationOperator)
@@ -95,7 +116,7 @@ def unregister():
 if __name__ == "__main__":
     register()
 
-# Your existing MIDI parsing and animation code
+# Parse midi file into dictionary of 'notes'
 def parse_midi(file_path):
     midi = mido.MidiFile(file_path)
     notes = []
@@ -115,37 +136,50 @@ def parse_midi(file_path):
                 note_info = note_times[note].pop(0)
                 note_info['end'] = current_time
                 notes.append((note, note_info['start'], note_info['end']))
-
     return notes
 
 def animate_keys(notes):
     fps = 24
     press_duration_frames = 1
     release_duration_frames = 1
-    key_depth = 0.015
+
+    first_white_key = bpy.data.objects.get("WhiteKey_21") 
+    if first_white_key:
+        white_key_height = first_white_key.dimensions.z  
+        key_depth = 0.8 * white_key_height # Based on white key because black keys are twice the height             
+    else:
+        raise ValueError("First white key not found. Ensure that your keys are named correctly.") # Inform user that the naming is incorrect
 
     for note, start_time, end_time in notes:
-        key_object = bpy.data.objects.get(f"WhiteKey_{note}") or bpy.data.objects.get(f"BlackKey_{note}")
+        key_object = bpy.data.objects.get(f"WhiteKey_{note}") or bpy.data.objects.get(f"BlackKey_{note}") # Select piano key based on midi number name
 
         if key_object and start_time < end_time:
+            
+            # Convert time to frame
             start_frame = convert_time_to_frame(start_time, fps)
             end_frame = convert_time_to_frame(end_time, fps)
 
+            # Make sure there is enough time for animation
             min_end_frame = start_frame + press_duration_frames + release_duration_frames + 1
             if end_frame < min_end_frame:
                 end_frame = min_end_frame
 
+            # Remember original position
             original_z = key_object.location.z
 
+            # Key in regular position
             key_object.location.z = original_z
             key_object.keyframe_insert(data_path="location", frame=start_frame - 1)
 
+            # Key pressed
             key_object.location.z = original_z - key_depth
             key_object.keyframe_insert(data_path="location", frame=start_frame + press_duration_frames)
 
+            # Key held down
             key_object.location.z = original_z - key_depth
             key_object.keyframe_insert(data_path="location", frame=end_frame - release_duration_frames)
 
+            # Key released
             key_object.location.z = original_z
             key_object.keyframe_insert(data_path="location", frame=end_frame)
 
@@ -162,7 +196,7 @@ def create_material(name, color):
     material.diffuse_color = color
     return material
 
-# Function to create the piano model if needed
+# Function to create the piano model if selected
 def create_piano_keys_and_base(context):
     # Create white material
     white_material = create_material("WhiteMaterial", (1, 1, 1, 1))
@@ -172,7 +206,7 @@ def create_piano_keys_and_base(context):
     base_material = create_material("BaseMaterial", (0.25, 0.1, 0.05, 1)) 
     
     # Create base
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(26, 0, -1))
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, -1))
     base_object = bpy.context.object
     base_object.scale = (52, 5, 1)
     base_object.name = "PianoBase"
@@ -180,9 +214,9 @@ def create_piano_keys_and_base(context):
 
     # Create white keys
     # (21 = A)
-    white_key_midi_numbers = [21, 23, 24, 26, 28, 29, 31, 33, 35, 36, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 84, 86, 88, 89, 91, 93, 95, 96, 98, 100, 101, 103, 105, 107, 108]
-    for i in range(52):
-        bpy.ops.mesh.primitive_cube_add(size=1, location=(i + 0.5, 0, 0))
+    white_key_midi_numbers = [21, 23, 24, 26, 27, 29, 31, 33, 34, 36, 37, 39, 41, 43, 44, 46, 47, 49, 51, 53, 54, 56, 57, 59, 61, 63, 64, 66, 67, 69, 71, 73, 74, 76, 77, 79, 81, 83, 84, 86, 88, 90, 91, 93, 95, 97, 98, 100, 102, 104, 105]
+    for i in range(len(white_key_midi_numbers)):
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(i - 25.5, 0, 0))
         key_object = bpy.context.object
         key_object.name = f"WhiteKey_{white_key_midi_numbers[i]}"
         key_object.scale = (1, 4.5, 1) 
@@ -198,9 +232,20 @@ def create_piano_keys_and_base(context):
                 break
             else:
                 if not (pos in [2, 5] and i % 7 == 0):
-                    bpy.ops.mesh.primitive_cube_add(size=1, location=(i * 7 + pos, 1, 0.4))
+                    bpy.ops.mesh.primitive_cube_add(size=1, location=(i * 7 + pos - 25.5, 1, 0.4))
                     key_object = bpy.context.object
                     key_object.name = f"BlackKey_{black_key_midi_numbers[midi_index]}"
                     key_object.scale = (0.6, 2.5, 1.8)  
                     key_object.data.materials.append(black_material)
                     midi_index += 1
+
+def add_background_music(mp3_filepath):
+    if bpy.context.scene.sequence_editor is None:
+        bpy.context.scene.sequence_editor_create()
+
+    # Clear existing strips
+    for strip in bpy.context.scene.sequence_editor.sequences_all:
+        bpy.context.scene.sequence_editor.sequences.remove(strip)
+
+    # Add MP3 strip
+    bpy.context.scene.sequence_editor.sequences.new_sound(name="BackgroundMusic", filepath=mp3_filepath, channel=1, frame_start=0)
